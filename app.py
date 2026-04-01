@@ -31,14 +31,15 @@ TICKERS = ["AAPL", "NVDA", "TSM", "ASML", "WULF", "ETN", "SMH", "GOOG"]
 # 2. 掃描與計算邏輯
 # ==========================================
 if st.sidebar.button("開始掃描市場", type="primary"):
-    with st.spinner('正在獲取數據並計算指標... (系統已啟動安全抓取模式，請稍候)'):
+    with st.spinner('正在獲取數據... (已啟用輕量級隱形抓取模式)'):
         results = []
         errors = []
 
         for ticker in TICKERS:
             try:
-                # 拿掉我們手動寫的 session，讓 yfinance 發揮它最新的反阻擋實力
                 stock = yf.Ticker(ticker)
+                
+                # 1. 只抓取最基礎的歷史 K 線 (最不容易被擋)
                 df = stock.history(period="1y")
                 
                 if df.empty or len(df) < 200:
@@ -83,10 +84,17 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 is_sma_nearing = (close_price > sma20) and (sma20 < sma50) and (abs(sma20 - sma50) / sma50 < 0.02)
                 sma_pass = is_sma_aligned or is_sma_nearing
 
-                # --- 基本面邏輯 ---
-                info = stock.info
-                market_cap_b = info.get('marketCap', 0) / 1_000_000_000
-                volume = info.get('regularMarketVolume', df['Volume'].iloc[-1])
+                # --- 基本面邏輯 (拔除笨重的 .info，全面輕量化) ---
+                
+                # 1. 直接從剛才載下來的 K 線表中拿最後一天的成交量 (0 次網路請求)
+                volume = df['Volume'].iloc[-1]
+                
+                # 2. 改用輕量級的 fast_info 拿市值 (大幅降低被擋機率)
+                market_cap_b = 0
+                try:
+                    market_cap_b = stock.fast_info.get('marketCap', 0) / 1_000_000_000
+                except:
+                    pass # 如果這隻股票真的抓不到市值，就跳過不報錯
 
                 # 過濾器檢查
                 cap_pass = False
@@ -133,7 +141,7 @@ if st.sidebar.button("開始掃描市場", type="primary"):
             except Exception as e:
                 errors.append(f"[{ticker}] 運算錯誤: {str(e)}")
             
-            # 讓程式乖乖睡覺，這是避開 Rate Limit 最有效的一招
+            # 維持 1.5 秒的安全間距
             time.sleep(1.5)
 
         # ==========================================
