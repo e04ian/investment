@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import time
-import requests
 
 # ==========================================
 # 1. 介面設定
@@ -32,21 +31,14 @@ TICKERS = ["AAPL", "NVDA", "TSM", "ASML", "WULF", "ETN", "SMH", "GOOG"]
 # 2. 掃描與計算邏輯
 # ==========================================
 if st.sidebar.button("開始掃描市場", type="primary"):
-    # 提醒使用者現在速度會稍微放慢
-    with st.spinner('正在獲取數據並計算指標... (為避免被 Yahoo 阻擋，系統會自動放慢抓取速度，請稍候)'):
+    with st.spinner('正在獲取數據並計算指標... (系統已啟動安全抓取模式，請稍候)'):
         results = []
         errors = []
 
-        # 建立一個偽裝成一般瀏覽器的 Session，降低被阻擋的機率
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
-
         for ticker in TICKERS:
             try:
-                # 使用帶有偽裝的 session 來抓取資料
-                stock = yf.Ticker(ticker, session=session)
+                # 拿掉我們手動寫的 session，讓 yfinance 發揮它最新的反阻擋實力
+                stock = yf.Ticker(ticker)
                 df = stock.history(period="1y")
                 
                 if df.empty or len(df) < 200:
@@ -91,7 +83,7 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 is_sma_nearing = (close_price > sma20) and (sma20 < sma50) and (abs(sma20 - sma50) / sma50 < 0.02)
                 sma_pass = is_sma_aligned or is_sma_nearing
 
-                # --- 基本面邏輯 (最容易觸發限制的地方) ---
+                # --- 基本面邏輯 ---
                 info = stock.info
                 market_cap_b = info.get('marketCap', 0) / 1_000_000_000
                 volume = info.get('regularMarketVolume', df['Volume'].iloc[-1])
@@ -141,7 +133,7 @@ if st.sidebar.button("開始掃描市場", type="primary"):
             except Exception as e:
                 errors.append(f"[{ticker}] 運算錯誤: {str(e)}")
             
-            # 【關鍵反阻擋機制】：每抓完一檔股票，強迫程式休息 1.5 秒
+            # 讓程式乖乖睡覺，這是避開 Rate Limit 最有效的一招
             time.sleep(1.5)
 
         # ==========================================
