@@ -23,58 +23,75 @@ st.sidebar.header("3. 流動性篩選")
 liq_high = st.sidebar.checkbox("流動性足夠 (成交量 > 100萬)")
 liq_low = st.sidebar.checkbox("流動性低 (成交量 < 50萬)")
 
-# 這裡可以隨時新增你想掃描的股票代號！
 TICKERS = ["AAPL", "NVDA", "TSM", "ASML", "WULF", "ETN", "SMH", "GOOG"]
 
 # ==========================================
 # ⚠️ 請在這裡貼上你剛註冊好的 FMP API KEY
 # ==========================================
-API_KEY = "lEwPy0dM1t9jhuMF4BJjk4oHNK17HYFU"
+API_KEY = "請把你的鑰匙貼在這裡"
 
 # ==========================================
-# 2. 掃描與計算邏輯 (使用 FMP 官方 API)
+# 2. 掃描與計算邏輯 (使用 FMP 最新 Stable API)
 # ==========================================
 if st.sidebar.button("開始掃描市場", type="primary"):
     if API_KEY == "請把你的鑰匙貼在這裡" or API_KEY == "":
-        st.error("❌ 錯誤：你還沒有在程式碼中填入 API Key！請到 GitHub 修改 app.py。")
+        st.error("❌ 錯誤：你還沒有在程式碼中填入 API Key！")
     else:
-        with st.spinner('正在透過 FMP 獲取數據...'):
+        with st.spinner('正在透過 FMP 最新 API 獲取數據...'):
             results = []
             errors = []
 
             for ticker in TICKERS:
                 try:
-                    # 1. 抓取基本面 (市值與今日成交量)
-                    quote_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={API_KEY}"
+                    # 1. 抓取基本面 (切換至最新的 stable 網址)
+                    quote_url = f"https://financialmodelingprep.com/stable/quote?symbol={ticker}&apikey={API_KEY}"
                     quote_res = requests.get(quote_url).json()
                     
-                    # 【新增的防呆機制】：檢查 API 是不是回傳了錯誤訊息
                     if isinstance(quote_res, dict) and "Error Message" in quote_res:
                         errors.append(f"[{ticker}] API 拒絕連線: {quote_res['Error Message']}")
                         continue
-                    elif isinstance(quote_res, dict):
-                        errors.append(f"[{ticker}] API 發生異常: {str(quote_res)}")
+                    elif isinstance(quote_res, dict) and "message" in quote_res:
+                        errors.append(f"[{ticker}] API 異常: {quote_res['message']}")
                         continue
                     elif not quote_res or len(quote_res) == 0:
-                        errors.append(f"[{ticker}] 找不到該股票")
+                        errors.append(f"[{ticker}] 找不到該股票報價")
                         continue
                     
-                    market_cap_b = quote_res[0].get('marketCap', 0) / 1_000_000_000
-                    volume = quote_res[0].get('volume', 0)
+                    # 容錯處理：取第一筆資料
+                    quote_data = quote_res[0] if isinstance(quote_res, list) else quote_res
+                    market_cap_b = quote_data.get('marketCap', 0) / 1_000_000_000
+                    volume = quote_data.get('volume', 0)
 
-                    # 2. 抓取歷史 K 線 (抓 200 天)
-                    hist_url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}?timeseries=200&apikey={API_KEY}"
+                    # 2. 抓取歷史 K 線 (切換至最新的 stable 網址)
+                    hist_url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={ticker}&apikey={API_KEY}"
                     hist_res = requests.get(hist_url).json()
                     
                     if isinstance(hist_res, dict) and "Error Message" in hist_res:
-                        errors.append(f"[{ticker}] API 拒絕給予歷史數據: {hist_res['Error Message']}")
+                        errors.append(f"[{ticker}] API 拒絕歷史數據: {hist_res['Error Message']}")
                         continue
-                    if 'historical' not in hist_res or len(hist_res['historical']) < 200:
+                    
+                    # 判斷資料格式以相容新版 API
+                    if isinstance(hist_res, dict) and 'historical' in hist_res:
+                        hist_data = hist_res['historical']
+                    elif isinstance(hist_res, list):
+                        hist_data = hist_res
+                    else:
+                        hist_data = []
+
+                    if len(hist_data) < 200:
                         errors.append(f"[{ticker}] 歷史數據不足 200 天")
                         continue
 
-                    df = pd.DataFrame(hist_res['historical'])
-                    df = df.iloc[::-1].reset_index(drop=True)
+                    # 轉換成 DataFrame 並確保依照日期由舊到新排列
+                    df = pd.DataFrame(hist_data)
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        df = df.sort_values('date').reset_index(drop=True)
+                    else:
+                        df = df.iloc[::-1].reset_index(drop=True)
+
+                    # 只取最後 250 天來計算，節省效能
+                    df = df.tail(250).reset_index(drop=True)
 
                     # --- 原生計算 SMA ---
                     close_series = df['close']
