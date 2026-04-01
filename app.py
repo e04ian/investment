@@ -1,6 +1,8 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import time
+import requests
 
 # ==========================================
 # 1. 介面設定
@@ -30,18 +32,25 @@ TICKERS = ["AAPL", "NVDA", "TSM", "ASML", "WULF", "ETN", "SMH", "GOOG"]
 # 2. 掃描與計算邏輯
 # ==========================================
 if st.sidebar.button("開始掃描市場", type="primary"):
-    with st.spinner('正在獲取數據並計算指標...'):
+    # 提醒使用者現在速度會稍微放慢
+    with st.spinner('正在獲取數據並計算指標... (為避免被 Yahoo 阻擋，系統會自動放慢抓取速度，請稍候)'):
         results = []
-        errors = [] # 追蹤錯誤原因
+        errors = []
+
+        # 建立一個偽裝成一般瀏覽器的 Session，降低被阻擋的機率
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
 
         for ticker in TICKERS:
             try:
-                # 換用更穩定的 history() 引擎抓取資料
-                stock = yf.Ticker(ticker)
+                # 使用帶有偽裝的 session 來抓取資料
+                stock = yf.Ticker(ticker, session=session)
                 df = stock.history(period="1y")
                 
                 if df.empty or len(df) < 200:
-                    errors.append(f"{ticker}: 歷史數據不足 200 天或抓取失敗")
+                    errors.append(f"[{ticker}] 歷史數據不足或抓取失敗")
                     continue
 
                 # --- 原生計算 SMA ---
@@ -57,7 +66,6 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 df['MACD_Signal'] = df['MACD_Line'].ewm(span=9, adjust=False).mean()
                 df['MACD_Hist'] = df['MACD_Line'] - df['MACD_Signal']
 
-                # 取得最新與前一天的數據
                 latest = df.iloc[-1]
                 previous = df.iloc[-2]
 
@@ -69,35 +77,26 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 prev_macd_signal = previous['MACD_Signal']
                 prev_macd_hist = previous['MACD_Hist']
 
-                # 條件 A：已經黃金交叉
                 is_macd_golden = (macd_line > macd_signal) and (prev_macd_line <= prev_macd_signal)
-                # 條件 B：即將交叉
                 is_macd_nearing = (macd_line < macd_signal) and (macd_hist > prev_macd_hist) and (macd_hist > -0.5)
-
                 macd_pass = is_macd_golden or is_macd_nearing
 
                 # --- SMA 邏輯 ---
                 sma20 = latest['SMA_20']
                 sma50 = latest['SMA_50']
                 sma200 = latest['SMA_200']
-                
-                # 確保數值型態正確
                 close_price = latest['Close'].item() if hasattr(latest['Close'], 'item') else latest['Close']
 
-                # 條件 A：多頭排列
                 is_sma_aligned = (close_price > sma20) and (sma20 > sma50) and (sma50 > sma200)
-                # 條件 B：即將交叉 (<2%差距)
                 is_sma_nearing = (close_price > sma20) and (sma20 < sma50) and (abs(sma20 - sma50) / sma50 < 0.02)
-
                 sma_pass = is_sma_aligned or is_sma_nearing
 
-                # --- 基本面邏輯 ---
+                # --- 基本面邏輯 (最容易觸發限制的地方) ---
                 info = stock.info
                 market_cap_b = info.get('marketCap', 0) / 1_000_000_000
-                # 雙重保險：如果 info 抓不到成交量，改用歷史線圖當天的成交量
                 volume = info.get('regularMarketVolume', df['Volume'].iloc[-1])
 
-                # 市值級距檢查
+                # 過濾器檢查
                 cap_pass = False
                 if not (cap_1 or cap_2 or cap_3 or cap_4 or cap_5):
                     cap_pass = True 
@@ -108,7 +107,6 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                     if cap_4 and 100 <= market_cap_b < 500: cap_pass = True
                     if cap_5 and market_cap_b >= 500: cap_pass = True
 
-                # 流動性檢查
                 liq_pass = False
                 if not (liq_high or liq_low):
                     liq_pass = True
@@ -124,7 +122,6 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 if not cap_pass: continue
                 if not liq_pass: continue
 
-                # 決定顯示狀態
                 if is_macd_golden: macd_status = "黃金交叉"
                 elif is_macd_nearing: macd_status = "即將交叉"
                 else: macd_status = "一般"
@@ -142,8 +139,10 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 })
 
             except Exception as e:
-                # 紀錄真正的錯誤原因，不再默默當機
                 errors.append(f"[{ticker}] 運算錯誤: {str(e)}")
+            
+            # 【關鍵反阻擋機制】：每抓完一檔股票，強迫程式休息 1.5 秒
+            time.sleep(1.5)
 
         # ==========================================
         # 4. 渲染表格與錯誤報告
@@ -155,7 +154,6 @@ if st.sidebar.button("開始掃描市場", type="primary"):
         else:
             st.warning("目前沒有符合所有過濾條件的股票。")
             
-        # 如果背景有股票抓取失敗，顯示除錯視窗
         if len(errors) > 0:
             with st.expander("⚠️ 部分股票抓取失敗 (點擊查看原因)"):
                 for err in errors:
