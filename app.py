@@ -23,21 +23,22 @@ st.sidebar.header("3. 流動性篩選")
 liq_high = st.sidebar.checkbox("流動性足夠 (成交量 > 100萬)")
 liq_low = st.sidebar.checkbox("流動性低 (成交量 < 50萬)")
 
+# 這裡可以隨時新增你想掃描的股票代號！
 TICKERS = ["AAPL", "NVDA", "TSM", "ASML", "WULF", "ETN", "SMH", "GOOG"]
 
 # ==========================================
 # ⚠️ 請在這裡貼上你剛註冊好的 FMP API KEY
 # ==========================================
-API_KEY = "lEwPy0dM1t9jhuMF4BJjk4oHNK17HYFU"
+API_KEY = "請把你的鑰匙貼在這裡"
 
 # ==========================================
 # 2. 掃描與計算邏輯 (使用 FMP 官方 API)
 # ==========================================
 if st.sidebar.button("開始掃描市場", type="primary"):
-    if API_KEY == "請把你的鑰匙貼在這裡":
-        st.error("❌ 錯誤：你還沒有在程式碼中填入 API Key！")
+    if API_KEY == "請把你的鑰匙貼在這裡" or API_KEY == "":
+        st.error("❌ 錯誤：你還沒有在程式碼中填入 API Key！請到 GitHub 修改 app.py。")
     else:
-        with st.spinner('正在透過合法 API 獲取數據... (絕對不會被擋)'):
+        with st.spinner('正在透過 FMP 獲取數據...'):
             results = []
             errors = []
 
@@ -46,22 +47,32 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                     # 1. 抓取基本面 (市值與今日成交量)
                     quote_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={API_KEY}"
                     quote_res = requests.get(quote_url).json()
-                    if not quote_res:
-                        errors.append(f"[{ticker}] 找不到該股票代號")
+                    
+                    # 【新增的防呆機制】：檢查 API 是不是回傳了錯誤訊息
+                    if isinstance(quote_res, dict) and "Error Message" in quote_res:
+                        errors.append(f"[{ticker}] API 拒絕連線: {quote_res['Error Message']}")
+                        continue
+                    elif isinstance(quote_res, dict):
+                        errors.append(f"[{ticker}] API 發生異常: {str(quote_res)}")
+                        continue
+                    elif not quote_res or len(quote_res) == 0:
+                        errors.append(f"[{ticker}] 找不到該股票")
                         continue
                     
                     market_cap_b = quote_res[0].get('marketCap', 0) / 1_000_000_000
                     volume = quote_res[0].get('volume', 0)
 
-                    # 2. 抓取歷史 K 線 (抓 200 天來算 SMA)
+                    # 2. 抓取歷史 K 線 (抓 200 天)
                     hist_url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}?timeseries=200&apikey={API_KEY}"
                     hist_res = requests.get(hist_url).json()
                     
+                    if isinstance(hist_res, dict) and "Error Message" in hist_res:
+                        errors.append(f"[{ticker}] API 拒絕給予歷史數據: {hist_res['Error Message']}")
+                        continue
                     if 'historical' not in hist_res or len(hist_res['historical']) < 200:
                         errors.append(f"[{ticker}] 歷史數據不足 200 天")
                         continue
 
-                    # 轉換成 DataFrame 並把順序反轉 (讓最舊的日期在前面)
                     df = pd.DataFrame(hist_res['historical'])
                     df = df.iloc[::-1].reset_index(drop=True)
 
@@ -81,7 +92,6 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                     latest = df.iloc[-1]
                     previous = df.iloc[-2]
 
-                    # --- MACD 邏輯 ---
                     macd_line, macd_signal, macd_hist = latest['MACD_Line'], latest['MACD_Signal'], latest['MACD_Hist']
                     prev_macd_line, prev_macd_signal, prev_macd_hist = previous['MACD_Line'], previous['MACD_Signal'], previous['MACD_Hist']
 
@@ -89,14 +99,12 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                     is_macd_nearing = (macd_line < macd_signal) and (macd_hist > prev_macd_hist) and (macd_hist > -0.5)
                     macd_pass = is_macd_golden or is_macd_nearing
 
-                    # --- SMA 邏輯 ---
                     sma20, sma50, sma200, close_price = latest['SMA_20'], latest['SMA_50'], latest['SMA_200'], latest['close']
 
                     is_sma_aligned = (close_price > sma20) and (sma20 > sma50) and (sma50 > sma200)
                     is_sma_nearing = (close_price > sma20) and (sma20 < sma50) and (abs(sma20 - sma50) / sma50 < 0.02)
                     sma_pass = is_sma_aligned or is_sma_nearing
 
-                    # 過濾器檢查
                     cap_pass = False
                     if not (cap_1 or cap_2 or cap_3 or cap_4 or cap_5):
                         cap_pass = True 
@@ -114,7 +122,6 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                         if liq_high and volume > 1000000: liq_pass = True
                         if liq_low and volume < 500000: liq_pass = True
 
-                    # 最終篩選
                     if filter_macd and not macd_pass: continue
                     if filter_sma and not sma_pass: continue
                     if not cap_pass: continue
@@ -139,9 +146,6 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 except Exception as e:
                     errors.append(f"[{ticker}] 運算錯誤: {str(e)}")
 
-            # ==========================================
-            # 4. 渲染表格與錯誤報告
-            # ==========================================
             if len(results) > 0:
                 st.success(f"掃描完成！找到 {len(results)} 檔符合條件的股票。")
                 df_results = pd.DataFrame(results)
