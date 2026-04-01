@@ -1,10 +1,9 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 
 # ==========================================
-# 1. 介面設定 (全中文 Checkbox)
+# 1. 介面設定
 # ==========================================
 st.set_page_config(page_title="量化選股器", layout="wide")
 st.title("MACD 為主 & SMA 為輔 量化選股器")
@@ -25,10 +24,10 @@ liq_high = st.sidebar.checkbox("流動性足夠 (成交量 > 100萬)")
 liq_low = st.sidebar.checkbox("流動性低 (成交量 < 50萬)")
 
 # 預設觀察清單
-TICKERS = ["AAPL", "NVDA", "TSM", "ASML", "q", "ETN", "SMH", "GOOG"]
+TICKERS = ["AAPL", "NVDA", "TSM", "ASML", "WULF", "ETN", "SMH", "GOOG"]
 
 # ==========================================
-# 2. 掃描與計算邏輯
+# 2. 掃描與計算邏輯 (Pure Pandas, No external TA library needed)
 # ==========================================
 if st.sidebar.button("開始掃描市場", type="primary"):
     with st.spinner('正在獲取數據並計算指標...'):
@@ -41,22 +40,31 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 if df.empty or len(df) < 200:
                     continue
 
-                # 計算指標
-                df.ta.macd(close='Close', fast=12, slow=26, signal=9, append=True)
-                df.ta.sma(length=20, append=True)
-                df.ta.sma(length=50, append=True)
-                df.ta.sma(length=200, append=True)
+                # --- 原生計算 SMA ---
+                # 使用 close 價格計算移動平均
+                close_series = df['Close'].squeeze()
+                df['SMA_20'] = close_series.rolling(window=20).mean()
+                df['SMA_50'] = close_series.rolling(window=50).mean()
+                df['SMA_200'] = close_series.rolling(window=200).mean()
 
+                # --- 原生計算 MACD ---
+                ema_12 = close_series.ewm(span=12, adjust=False).mean()
+                ema_26 = close_series.ewm(span=26, adjust=False).mean()
+                df['MACD_Line'] = ema_12 - ema_26
+                df['MACD_Signal'] = df['MACD_Line'].ewm(span=9, adjust=False).mean()
+                df['MACD_Hist'] = df['MACD_Line'] - df['MACD_Signal']
+
+                # 取得最新與前一天的數據
                 latest = df.iloc[-1]
                 previous = df.iloc[-2]
 
                 # --- MACD 邏輯 ---
-                macd_line = latest['MACD_12_26_9']
-                macd_signal = latest['MACDs_12_26_9']
-                macd_hist = latest['MACDh_12_26_9']
-                prev_macd_line = previous['MACD_12_26_9']
-                prev_macd_signal = previous['MACDs_12_26_9']
-                prev_macd_hist = previous['MACDh_12_26_9']
+                macd_line = latest['MACD_Line']
+                macd_signal = latest['MACD_Signal']
+                macd_hist = latest['MACD_Hist']
+                prev_macd_line = previous['MACD_Line']
+                prev_macd_signal = previous['MACD_Signal']
+                prev_macd_hist = previous['MACD_Hist']
 
                 # 條件 A：已經黃金交叉
                 is_macd_golden = (macd_line > macd_signal) and (prev_macd_line <= prev_macd_signal)
@@ -70,7 +78,7 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 sma20 = latest['SMA_20']
                 sma50 = latest['SMA_50']
                 sma200 = latest['SMA_200']
-                close_price = latest['Close']
+                close_price = latest['Close'].item() if isinstance(latest['Close'], pd.Series) else latest['Close']
 
                 # 條件 A：多頭排列
                 is_sma_aligned = (close_price > sma20) and (sma20 > sma50) and (sma50 > sma200)
