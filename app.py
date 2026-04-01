@@ -27,21 +27,24 @@ liq_low = st.sidebar.checkbox("流動性低 (成交量 < 50萬)")
 TICKERS = ["AAPL", "NVDA", "TSM", "ASML", "WULF", "ETN", "SMH", "GOOG"]
 
 # ==========================================
-# 2. 掃描與計算邏輯 (Pure Pandas, No external TA library needed)
+# 2. 掃描與計算邏輯
 # ==========================================
 if st.sidebar.button("開始掃描市場", type="primary"):
     with st.spinner('正在獲取數據並計算指標...'):
         results = []
+        errors = [] # 追蹤錯誤原因
 
         for ticker in TICKERS:
             try:
-                # 下載歷史數據
-                df = yf.download(ticker, period="1y", interval="1d", progress=False)
+                # 換用更穩定的 history() 引擎抓取資料
+                stock = yf.Ticker(ticker)
+                df = stock.history(period="1y")
+                
                 if df.empty or len(df) < 200:
+                    errors.append(f"{ticker}: 歷史數據不足 200 天或抓取失敗")
                     continue
 
                 # --- 原生計算 SMA ---
-                # 使用 close 價格計算移動平均
                 close_series = df['Close'].squeeze()
                 df['SMA_20'] = close_series.rolling(window=20).mean()
                 df['SMA_50'] = close_series.rolling(window=50).mean()
@@ -68,8 +71,7 @@ if st.sidebar.button("開始掃描市場", type="primary"):
 
                 # 條件 A：已經黃金交叉
                 is_macd_golden = (macd_line > macd_signal) and (prev_macd_line <= prev_macd_signal)
-                
-                # 條件 B：即將交叉 (柱狀圖為負但正在向上收斂)
+                # 條件 B：即將交叉
                 is_macd_nearing = (macd_line < macd_signal) and (macd_hist > prev_macd_hist) and (macd_hist > -0.5)
 
                 macd_pass = is_macd_golden or is_macd_nearing
@@ -78,20 +80,22 @@ if st.sidebar.button("開始掃描市場", type="primary"):
                 sma20 = latest['SMA_20']
                 sma50 = latest['SMA_50']
                 sma200 = latest['SMA_200']
-                close_price = latest['Close'].item() if isinstance(latest['Close'], pd.Series) else latest['Close']
+                
+                # 確保數值型態正確
+                close_price = latest['Close'].item() if hasattr(latest['Close'], 'item') else latest['Close']
 
                 # 條件 A：多頭排列
                 is_sma_aligned = (close_price > sma20) and (sma20 > sma50) and (sma50 > sma200)
-
-                # 條件 B：即將交叉 (價格在20T之上，且20T與50T差距小於2%)
+                # 條件 B：即將交叉 (<2%差距)
                 is_sma_nearing = (close_price > sma20) and (sma20 < sma50) and (abs(sma20 - sma50) / sma50 < 0.02)
 
                 sma_pass = is_sma_aligned or is_sma_nearing
 
                 # --- 基本面邏輯 ---
-                info = yf.Ticker(ticker).info
+                info = stock.info
                 market_cap_b = info.get('marketCap', 0) / 1_000_000_000
-                volume = info.get('regularMarketVolume', 0)
+                # 雙重保險：如果 info 抓不到成交量，改用歷史線圖當天的成交量
+                volume = info.get('regularMarketVolume', df['Volume'].iloc[-1])
 
                 # 市值級距檢查
                 cap_pass = False
@@ -131,17 +135,18 @@ if st.sidebar.button("開始掃描市場", type="primary"):
 
                 results.append({
                     "股票代號": ticker,
-                    "市值 ($B)": round(market_cap_b, 2),
+                    "市值 ($B)": round(market_cap_b, 2) if market_cap_b > 0 else "N/A",
                     "成交量": f"{volume/1000000:.2f}M",
                     "MACD 狀態": macd_status,
                     "SMA 狀態": sma_status
                 })
 
             except Exception as e:
-                pass # 略過數據缺失或發生錯誤的股票
+                # 紀錄真正的錯誤原因，不再默默當機
+                errors.append(f"[{ticker}] 運算錯誤: {str(e)}")
 
         # ==========================================
-        # 4. 渲染表格
+        # 4. 渲染表格與錯誤報告
         # ==========================================
         if len(results) > 0:
             st.success(f"掃描完成！找到 {len(results)} 檔符合條件的股票。")
@@ -149,3 +154,9 @@ if st.sidebar.button("開始掃描市場", type="primary"):
             st.dataframe(df_results, use_container_width=True)
         else:
             st.warning("目前沒有符合所有過濾條件的股票。")
+            
+        # 如果背景有股票抓取失敗，顯示除錯視窗
+        if len(errors) > 0:
+            with st.expander("⚠️ 部分股票抓取失敗 (點擊查看原因)"):
+                for err in errors:
+                    st.error(err)
